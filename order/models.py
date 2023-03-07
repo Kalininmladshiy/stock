@@ -2,6 +2,9 @@ from django.db import models
 from phonenumber_field.modelfields import PhoneNumberField
 from django.core.validators import MinValueValidator, DecimalValidator
 from django.utils import timezone
+from django.conf import settings
+from .utils import fetch_coordinates
+from geopy import distance
 
 
 class Stock(models.Model):
@@ -185,22 +188,20 @@ class OrderItem(models.Model):
         null=True,
     )
     price = models.DecimalField(
-        'Цена',
+        'Цена за хранение с учетом логистики',
         max_digits=8,
         decimal_places=2,
+        null=True,
         validators=[MinValueValidator(0), DecimalValidator(8, 2)],
     )
     quantity = models.PositiveIntegerField('Количество', null=True)
-
-    class Meta:
-        verbose_name = 'Элемент заказа'
-        verbose_name_plural = 'Элементы заказа'
-
-    def __str__(self):
-        return '{}'.format(self.id)
-
-    def get_cost(self):
-        return self.price * self.quantity
+    stock_that_will_store = models.ForeignKey(
+        Stock,
+        verbose_name='Склад, где будут хранить',
+        related_name='order_items',
+        on_delete=models.SET_NULL,
+        null=True,
+    )
 
     class Meta:
         verbose_name = 'Элемент заказа'
@@ -212,3 +213,21 @@ class OrderItem(models.Model):
     def get_cost(self):
         return self.price * self.quantity
 
+    def get_distance_with_tax(self):
+        clients_coordinates = fetch_coordinates(self.order.adress)
+        available_stocks_with_price = []
+        stock_items = StockItem.objects.filter(
+            product=self.product.id,
+            availability=True,
+        ).prefetch_related('stock')
+        for item in stock_items:
+            available_stocks_with_price.append((item.stock.address, item.price))
+        stock_distance_with_tax = []
+        for stock, price in available_stocks_with_price:
+            stock_coordinates = fetch_coordinates(stock)
+            rest_distance = distance.distance(clients_coordinates, stock_coordinates).km
+            transport_tax = rest_distance * settings.TRANSPORT_TAX
+            logistic_cost = price * self.quantity
+            total_cost = transport_tax + logistic_cost
+            stock_distance_with_tax.append((stock, rest_distance, total_cost))
+        return sorted(stock_distance_with_tax, key=lambda item: item[2])
